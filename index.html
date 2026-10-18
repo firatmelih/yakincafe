@@ -67,6 +67,8 @@
   #music .song { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-bottom: 6px; }
   #music .song b { color: var(--ink); font-weight: 800; }
   #music iframe { display: block; width: 100%; height: 80px; border: 0; border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
+  #spotifyEmbed { min-height: 80px; }
+  #musicHint { font-size: 11px; font-weight: 700; color: var(--ink-soft); margin: -2px 0 6px; }
 
   #panel {
     position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom));
@@ -117,6 +119,27 @@
     button { font-size: 13px; padding: 6px 10px; min-height: 34px; }
   }
 </style>
+<script>
+  // music: browsers never allow sound before the visitor interacts, so the official Spotify player
+  // starts on the first touch / click / key press anywhere on the page
+  (() => {
+    let ctrl = null, wanted = false, started = false;
+    const hint = () => document.getElementById('musicHint');
+    const begin = () => { if (started || !ctrl) return; started = true; ctrl.play(); };
+    const onFirst = () => { wanted = true; begin(); ['pointerdown', 'keydown', 'touchstart'].forEach(ev => removeEventListener(ev, onFirst, true)); };
+    ['pointerdown', 'keydown', 'touchstart'].forEach(ev => addEventListener(ev, onFirst, true));
+    window.onSpotifyIframeApiReady = api => {
+      api.createController(document.getElementById('spotifyEmbed'),
+        { uri: 'spotify:track:2aibwv5hGXSgw7Yru8IYTO', width: '100%', height: 80, theme: 'dark' },
+        c => {
+          ctrl = c;
+          c.addListener('playback_update', e => { if (!e.data.isPaused && hint()) hint().remove(); });
+          if (wanted) begin();
+        });
+    };
+  })();
+</script>
+<script src="https://open.spotify.com/embed/iframe-api/v1" async></script>
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
@@ -135,10 +158,9 @@
   </div>
   <div id="music" aria-label="Müzik">
     <div class="song">♪ Şarkı: <b>Snow (Hey Oh)</b> · Red Hot Chili Peppers</div>
-    <!-- official Spotify embed: playback is licensed and served by Spotify (rights: Warner Records) -->
-    <iframe title="Spotify: Snow (Hey Oh) · Red Hot Chili Peppers" loading="lazy"
-      src="https://open.spotify.com/embed/track/2aibwv5hGXSgw7Yru8IYTO?utm_source=generator&theme=0"
-      allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>
+    <div id="musicHint">ekrana dokununca çalmaya başlar</div>
+    <!-- official Spotify embed (iFrame API): playback is licensed and served by Spotify (rights: Warner Records) -->
+    <div id="spotifyEmbed"></div>
   </div>
 </header>
 <div class="hint">sürükle: çevir · yakınlaş: içeriyi gör · çift tıkla: küreyi salla</div>

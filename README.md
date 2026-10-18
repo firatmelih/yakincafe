@@ -10,4 +10,4 @@ Low-poly 3D snow globe of the **yakın** café, with Can the barista and Havlu t
 
 The model was built in Blender (scripts are not included) and runs on [three.js](https://threejs.org) (MIT). Font: [Nunito](https://fonts.google.com/specimen/Nunito) (SIL OFL).
 
-Music: "Snow (Hey Oh)" by Red Hot Chili Peppers, played through the **official Spotify embed**. No audio file is hosted in this repository; all rights belong to their owners (Warner Records).
+Music: "Snow (Hey Oh)" by Red Hot Chili Peppers, played through the **official Spotify embed** (iFrame API). Browsers allow no sound before the first interaction, so playback starts on the first touch, click or key press. No audio file is hosted in this repository; all rights belong to their owners (Warner Records).
