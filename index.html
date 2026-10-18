@@ -49,7 +49,7 @@
       radial-gradient(1.5px 1.5px at 93% 66%, #fff8 50%, transparent 51%),
       radial-gradient(1px 1px at 55% 6%, #fff9 50%, transparent 51%),
       radial-gradient(1px 1px at 34% 78%, #fff5 50%, transparent 51%),
-      radial-gradient(120% 90% at 50% 35%, #2a3160 0%, #0d1024 100%);
+      radial-gradient(120% 90% at 50% 35%, #3e4c8e 0%, #1a2148 100%);
   }
   body.night #sky-night { opacity: 1; }
   canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
@@ -66,9 +66,21 @@
   #music { pointer-events: auto; width: 320px; text-align: right; }
   #music .song { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-bottom: 6px; }
   #music .song b { color: var(--ink); font-weight: 800; }
-  #music iframe { display: block; width: 100%; height: 80px; border: 0; border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.18); }
-  #spotifyEmbed { min-height: 80px; }
-  #musicHint { font-size: 11px; font-weight: 700; color: var(--ink-soft); margin: -2px 0 6px; }
+  #music .player { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 16px; text-align: left;
+    background: var(--panel); border: 1px solid var(--panel-line); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+    box-shadow: 0 6px 24px rgba(0,0,0,.14); }
+  #music .cover { width: 46px; height: 46px; border-radius: 10px; display: grid; place-items: center; font-size: 24px;
+    background: linear-gradient(135deg, #5c3b27, #1f3d2f); flex: none; }
+  #music .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+  #music .meta b { font-size: 14px; font-weight: 800; color: var(--ink); }
+  #music .meta span { font-size: 12px; color: var(--ink-soft); }
+  #music .eq { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
+  #music .eq i { width: 3px; height: 4px; border-radius: 2px; background: var(--accent); }
+  #music.playing .eq i { animation: eq 0.9s ease-in-out infinite; }
+  #music.playing .eq i:nth-child(2) { animation-delay: -0.3s; } #music.playing .eq i:nth-child(3) { animation-delay: -0.6s; } #music.playing .eq i:nth-child(4) { animation-delay: -0.15s; }
+  @keyframes eq { 0%, 100% { height: 4px; } 50% { height: 16px; } }
+  #musicBtn { width: 40px; height: 40px; min-height: 0; padding: 0; flex: none; font-size: 14px; background: var(--accent); color: var(--accent-ink); border: 0; }
+  #musicHint { font-size: 11px; font-weight: 700; color: var(--ink-soft); margin-top: 6px; }
 
   #panel {
     position: fixed; left: 50%; bottom: max(16px, env(safe-area-inset-bottom));
@@ -120,26 +132,144 @@
   }
 </style>
 <script>
-  // music: browsers never allow sound before the visitor interacts, so the official Spotify player
-  // starts on the first touch / click / key press anywhere on the page
+  // "Kahve Molası": an original lo-fi café loop synthesised live with Web Audio (no audio file, no licence needed).
+  // Browsers only allow sound after an interaction, so it starts on the first touch / click / key press.
   (() => {
-    let ctrl = null, wanted = false, started = false;
-    const hint = () => document.getElementById('musicHint');
-    const begin = () => { if (started || !ctrl) return; started = true; ctrl.play(); };
-    const onFirst = () => { wanted = true; begin(); ['pointerdown', 'keydown', 'touchstart'].forEach(ev => removeEventListener(ev, onFirst, true)); };
-    ['pointerdown', 'keydown', 'touchstart'].forEach(ev => addEventListener(ev, onFirst, true));
-    window.onSpotifyIframeApiReady = api => {
-      api.createController(document.getElementById('spotifyEmbed'),
-        { uri: 'spotify:track:2aibwv5hGXSgw7Yru8IYTO', width: '100%', height: 80, theme: 'dark' },
-        c => {
-          ctrl = c;
-          c.addListener('playback_update', e => { if (!e.data.isPaused && hint()) hint().remove(); });
-          if (wanted) begin();
-        });
+    const BPM = 74, BEAT = 60 / BPM, BAR = BEAT * 4, SWING = 0.16;
+    const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+    // two 4-bar progressions (Fmaj7 Em7 Dm7 Cmaj7 / Bbmaj7 Am7 Gm7 C9) with their bass roots
+    const PROGS = [
+      [[53, 57, 60, 64], [52, 55, 59, 62], [50, 53, 57, 60], [48, 52, 55, 59]],
+      [[46, 50, 53, 57], [45, 48, 52, 55], [43, 46, 50, 53], [48, 52, 58, 62]],
+    ];
+    const ROOTS = [[41, 40, 38, 36], [34, 33, 31, 36]];
+    const PENTA = [72, 74, 76, 79, 81, 84, 86];
+    let ac, out, verb, noiseBuf, timer = null, nextBarTime = 0, bar = 0, melodyIdx = 3, playing = false, started = false;
+
+    function setup() {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      const comp = ac.createDynamicsCompressor(); comp.threshold.value = -18; comp.ratio.value = 3;
+      const tone = ac.createBiquadFilter(); tone.type = 'lowpass'; tone.frequency.value = 3400; tone.Q.value = 0.4;
+      out = ac.createGain(); out.gain.value = 0;
+      out.connect(tone); tone.connect(comp); comp.connect(ac.destination);
+      // small room reverb from a generated impulse
+      verb = ac.createConvolver();
+      const len = ac.sampleRate * 2.4, ir = ac.createBuffer(2, len, ac.sampleRate);
+      for (let c = 0; c < 2; c++) { const d = ir.getChannelData(c); for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2); }
+      verb.buffer = ir;
+      const wet = ac.createGain(); wet.gain.value = 0.28; verb.connect(wet); wet.connect(out);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+      const nd = noiseBuf.getChannelData(0); for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+      // vinyl: soft hiss + random crackles
+      const hiss = ac.createBufferSource(); hiss.buffer = noiseBuf; hiss.loop = true;
+      const hf = ac.createBiquadFilter(); hf.type = 'bandpass'; hf.frequency.value = 2600; hf.Q.value = 0.6;
+      const hg = ac.createGain(); hg.gain.value = 0.012; hiss.connect(hf); hf.connect(hg); hg.connect(out); hiss.start();
+    }
+    const voice = (dest, gainVal) => { const g = ac.createGain(); g.gain.value = gainVal; g.connect(dest); return g; };
+    // warm electric piano: FM sine pair, slow decay, slight stereo detune
+    function keys(note, t, dur, vel, pan = 0) {
+      const f = mtof(note), g = ac.createGain(), p = ac.createStereoPanner(); p.pan.value = pan;
+      g.connect(p); p.connect(out); p.connect(verb);
+      const car = ac.createOscillator(), mod = ac.createOscillator(), mg = ac.createGain();
+      car.frequency.value = f; car.detune.value = (Math.random() - 0.5) * 8;
+      mod.frequency.value = f; mg.gain.setValueAtTime(f * 1.1 * vel, t); mg.gain.exponentialRampToValueAtTime(f * 0.08, t + 1.2);
+      mod.connect(mg); mg.connect(car.frequency); car.connect(g);
+      const peak = 0.075 * vel;
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(peak, t + 0.012);
+      g.gain.exponentialRampToValueAtTime(peak * 0.35, t + 0.9); g.gain.exponentialRampToValueAtTime(0.0001, t + dur + 0.6);
+      car.start(t); mod.start(t); car.stop(t + dur + 0.7); mod.stop(t + dur + 0.7);
+    }
+    function bell(note, t, vel) {
+      const f = mtof(note), o = ac.createOscillator(), o2 = ac.createOscillator(), g = ac.createGain();
+      o.type = 'sine'; o.frequency.value = f; o2.type = 'sine'; o2.frequency.value = f * 2.01;
+      const g2 = ac.createGain(); g2.gain.value = 0.25; o2.connect(g2); g2.connect(g); o.connect(g);
+      g.connect(out); g.connect(verb);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.05 * vel, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
+      o.start(t); o2.start(t); o.stop(t + 1.7); o2.stop(t + 1.7);
+    }
+    function bass(note, t, dur) {
+      const o = ac.createOscillator(), lp = ac.createBiquadFilter(), g = ac.createGain();
+      o.type = 'triangle'; o.frequency.value = mtof(note); lp.type = 'lowpass'; lp.frequency.value = 380;
+      o.connect(lp); lp.connect(g); g.connect(out);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.22, t + 0.03); g.gain.exponentialRampToValueAtTime(0.06, t + dur * 0.8); g.gain.linearRampToValueAtTime(0, t + dur);
+      o.start(t); o.stop(t + dur + 0.05);
+    }
+    function kick(t) {
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.setValueAtTime(120, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.14);
+      g.gain.setValueAtTime(0.42, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+      o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.35);
+    }
+    function noiseHit(t, type, freq, q, level, decay) {
+      const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+      s.buffer = noiseBuf; f.type = type; f.frequency.value = freq; f.Q.value = q;
+      s.connect(f); f.connect(g); g.connect(out); if (type === 'bandpass') g.connect(verb);
+      g.gain.setValueAtTime(level, t); g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+      s.start(t, Math.random()); s.stop(t + decay + 0.02);
+    }
+    function scheduleBar(t) {
+      const section = Math.floor(bar / 8) % 2, idx = bar % 4;
+      const chord = PROGS[section][idx], root = ROOTS[section][idx];
+      const eighth = k => t + k * BEAT / 2 + (k % 2 ? SWING * BEAT / 2 : 0);
+      // chord: soft strum on 1, lighter re-hit on the "and" of 3
+      chord.forEach((n, i) => keys(n, t + i * 0.018, BAR * 0.62, 0.85, (i - 1.5) * 0.25));
+      if (bar % 2) chord.slice(1).forEach((n, i) => keys(n + 12 * (i === 2), eighth(5) + i * 0.015, BEAT * 1.2, 0.5, 0.2));
+      bass(root, t, BEAT * 1.6); bass(root + (idx === 3 ? 7 : 12), eighth(3), BEAT * 0.8); bass(root, eighth(5), BEAT * 1.2);
+      if (bar >= 2) {   // drums come in after a two-bar intro
+        kick(eighth(0)); kick(eighth(3)); if (bar % 4 === 3) kick(eighth(7));
+        noiseHit(eighth(2), 'bandpass', 1700, 0.7, 0.12, 0.2); noiseHit(eighth(6), 'bandpass', 1700, 0.7, 0.12, 0.2);
+        for (let k = 0; k < 8; k++) noiseHit(eighth(k), 'highpass', 7200, 0.5, k % 2 ? 0.018 : 0.032, 0.045);
+      }
+      if (bar >= 4 && Math.random() < 0.7) {   // little pentatonic melody
+        const n = 2 + Math.floor(Math.random() * 3);
+        for (let k = 0; k < n; k++) {
+          melodyIdx = Math.max(0, Math.min(PENTA.length - 1, melodyIdx + Math.floor(Math.random() * 3) - 1));
+          bell(PENTA[melodyIdx] - (section ? 2 : 0), eighth(1 + k * 2), 0.8 + Math.random() * 0.4);
+        }
+      }
+      for (let k = 0; k < 3; k++) if (Math.random() < 0.6) noiseHit(t + Math.random() * BAR, 'highpass', 3000, 0.3, 0.03 * Math.random(), 0.012);   // crackle
+      bar++;
+    }
+    function tick() { while (nextBarTime < ac.currentTime + 0.4) { scheduleBar(nextBarTime); nextBarTime += BAR; } }
+    function ui() {
+      const b = document.getElementById('musicBtn'), card = document.getElementById('music');
+      if (!b) return;
+      b.textContent = playing ? '❚❚' : '▶'; b.setAttribute('aria-label', playing ? 'Duraklat' : 'Çal');
+      card.classList.toggle('playing', playing);
+      const h = document.getElementById('musicHint'); if (h && started) h.remove();
+    }
+    function play() {
+      if (!ac) setup();
+      ac.resume();
+      if (!started) started = true;
+      if (nextBarTime < ac.currentTime) nextBarTime = ac.currentTime + 0.1;   // after a pause, carry on from now
+      if (!timer) timer = setInterval(tick, 60);
+      out.gain.cancelScheduledValues(ac.currentTime); out.gain.setTargetAtTime(0.6, ac.currentTime, 0.4);
+      playing = true; ui();
+    }
+    function pause() {
+      if (!ac) return;
+      out.gain.cancelScheduledValues(ac.currentTime); out.gain.setTargetAtTime(0, ac.currentTime, 0.15);
+      clearInterval(timer); timer = null;
+      setTimeout(() => { if (!playing) ac.suspend(); }, 600);
+      playing = false; ui();
+    }
+    const first = e => {
+      if (e.target && e.target.id === 'musicBtn') return;   // the button handles itself
+      if (!started) play();
+      ['pointerdown', 'keydown', 'touchstart'].forEach(ev => removeEventListener(ev, first, true));
     };
+    ['pointerdown', 'keydown', 'touchstart'].forEach(ev => addEventListener(ev, first, true));
+    addEventListener('DOMContentLoaded', () => {
+      document.getElementById('musicBtn').addEventListener('click', () => {
+        ['pointerdown', 'keydown', 'touchstart'].forEach(ev => removeEventListener(ev, first, true));
+        playing ? pause() : play();
+      });
+      ui();
+    });
+    window.__music = { play, pause, get playing() { return playing; } };
   })();
 </script>
-<script src="https://open.spotify.com/embed/iframe-api/v1" async></script>
 <script type="importmap">
 { "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
@@ -157,10 +287,14 @@
     <div id="mood"></div>
   </div>
   <div id="music" aria-label="Müzik">
-    <div class="song">♪ Şarkı: <b>Snow (Hey Oh)</b> · Red Hot Chili Peppers</div>
+    <div class="song">♪ Şarkı: <b>Kahve Molası</b> · yakın lo-fi</div>
+    <div class="player">
+      <div class="cover" aria-hidden="true">☕</div>
+      <div class="meta"><b>Kahve Molası</b><span>yakın lo-fi · özgün beste</span></div>
+      <div class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <button id="musicBtn" aria-label="Çal">▶</button>
+    </div>
     <div id="musicHint">ekrana dokununca çalmaya başlar</div>
-    <!-- official Spotify embed (iFrame API): playback is licensed and served by Spotify (rights: Warner Records) -->
-    <div id="spotifyEmbed"></div>
   </div>
 </header>
 <div class="hint">sürükle: çevir · yakınlaş: içeriyi gör · çift tıkla: küreyi salla</div>
@@ -243,6 +377,9 @@ Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, n
 sun.shadow.bias = -0.0005;
 sun.shadow.normalBias = 0.04;
 scene.add(sun, sun.target);
+const roomLamp = new THREE.SpotLight(0xffd6a6, 0, 0, 0.62, 0.85, 0);   // a warm room lamp above the table (night only)
+roomLamp.position.set(10, 34, 22); roomLamp.target.position.set(0, -1, 0);
+scene.add(roomLamp, roomLamp.target);
 
 // warm lamps inside the café (ceiling spots) and two under the front overhang (outdoor)
 // downward spots (like the real track lights) so the light never leaks up through the roof
@@ -1556,22 +1693,22 @@ const SEASON = {
     bush: ['#4f9a44', '#3c7f3a'], flowers: 1, bg: ['#fdeef0', '#efcdd6'], fall: ['#f7c6d4', '#ffffff', '#f2a7bd'], steam: 0.6,
     mood: { day: 'çiçekler açtı, terasta kahve keyfi', night: 'serin bir bahar akşamı' },
     day: { sun: '#fff0dc', sunI: 2.6, elev: 48, az: 35, sky: '#d3e7ff', ground: '#a3977f', hemiI: 1.0, inside: 0.3, insideCol: '#ffd8a8', exp: 1.0 },
-    night: { moon: '#aab9ff', moonI: 0.5, sky: '#3c4c80', ground: '#1e2a22', hemiI: 0.5, exp: 1.12 } },
+    night: { moon: '#b4c2ff', moonI: 0.9, sky: '#5a6cb0', ground: '#3a3a40', hemiI: 0.95, exp: 1.28 } },
   summer: { name: 'Yaz', weather: 'clear', fx: 'summer', grass: '#6aae46', foliage: ['#3f8a3a', '#58a046', '#2e6b31'], pine: '#2b5e3a',
     bush: ['#3d7a3a', '#2e6331'], flowers: 0.6, bg: ['#fdf3df', '#eed3a8'], fall: null, steam: 0.3,
     mood: { day: 'güneşli, kelebekler uçuşuyor', night: 'sıcak gece, ateşböcekleri' },
     day: { sun: '#fff6e6', sunI: 3.0, elev: 58, az: 25, sky: '#c4e2ff', ground: '#a39a80', hemiI: 1.08, inside: 0.16, insideCol: '#ffe2bd', exp: 1.0 },
-    night: { moon: '#b3c0ff', moonI: 0.55, sky: '#3a4a7a', ground: '#1f2b20', hemiI: 0.52, exp: 1.12 } },
+    night: { moon: '#bcc8ff', moonI: 0.95, sky: '#5a6aa8', ground: '#3a3a40', hemiI: 0.95, exp: 1.28 } },
   autumn: { name: 'Sonbahar', weather: 'rain', fx: 'leaves', grass: '#a69a4a', foliage: ['#e07b2a', '#c9462c', '#e8b23a'], pine: '#2f5a37',
     bush: ['#b5562a', '#8a6a2a'], flowers: 0, bg: ['#f3e2d0', '#d9b48f'], fall: ['#d9762b', '#c4482a', '#e6b03a', '#b5562a'], steam: 0.85,
     mood: { day: 'yağmurlu, yapraklar dökülüyor', night: 'yağmurlu bir sonbahar gecesi' },
     day: { sun: '#ffd2a0', sunI: 1.15, elev: 26, az: 60, sky: '#e2d8cc', ground: '#8f7a5e', hemiI: 0.9, inside: 0.75, insideCol: '#ffb877', exp: 1.03 },
-    night: { moon: '#9fb0e8', moonI: 0.38, sky: '#323c64', ground: '#1e1a14', hemiI: 0.46, exp: 1.15 } },
+    night: { moon: '#aab8ee', moonI: 0.75, sky: '#4c5890', ground: '#3a342c', hemiI: 0.85, exp: 1.3 } },
   winter: { name: 'Kış', weather: 'snow', fx: null, grass: '#eef3f8', foliage: ['#3f8a3a', '#58a046', '#2e6b31'], pine: '#2b5440',
     bush: ['#2f5a3a', '#284d33'], flowers: 0, bg: ['#eef3fa', '#c9d6e8'], fall: null, steam: 1.0,
     mood: { day: 'kar yağıyor, içerisi sıcacık', night: 'karlı bir kış gecesi' },
     day: { sun: '#eef2ff', sunI: 1.5, elev: 22, az: 20, sky: '#dfe8f5', ground: '#e7edf4', hemiI: 1.05, inside: 0.85, insideCol: '#ffb06a', exp: 0.98 },
-    night: { moon: '#a9b8ff', moonI: 0.5, sky: '#3c4c80', ground: '#5a6070', hemiI: 0.62, exp: 1.12 } },
+    night: { moon: '#b4c2ff', moonI: 0.9, sky: '#5a6cb0', ground: '#7a8090', hemiI: 1.05, exp: 1.28 } },
 };
 const WARM = new THREE.Color('#ffb46a');
 
@@ -1626,6 +1763,7 @@ function applyAll() {
   const inCol = night ? WARM : new THREE.Color(S.day.insideCol);
   insideLights.forEach(l => { l.intensity = 30 * inK; l.color.copy(inCol); });
   porchLights.forEach(l => { l.intensity = night ? 14 : 0; });
+  roomLamp.intensity = night ? 1.6 : 0;
   lanternLights.forEach(l => { l.intensity = night ? 7 : 0; l.color.set('#ffc27a'); });
   lampLight.intensity = night ? 14 : 0;
   lampBulbMat.emissiveIntensity = night ? 3 : 0;
